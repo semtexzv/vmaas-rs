@@ -1,9 +1,10 @@
 [workspace]
-members = ["upcache", "api"]
+members = ["upcache", "api", "jtool"]
 
 
 [profile.dev]
 opt-level = 1
 
 [profile.release]
+debug = true
 opt-level = 3

@@ -9,8 +9,9 @@ use std::fmt::Display;
 mod util;
 
 use util::*;
+use env_logger::builder;
 
-#[derive(Debug, Deserialize, Serialize, Clone, Hash, PartialOrd, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone, Hash, PartialOrd, PartialEq, Eq, Ord)]
 pub struct Evr(
     #[serde(deserialize_with = "deserialize_number_from_string")]
     pub i64,
@@ -40,7 +41,7 @@ impl Display for Evr {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, Hash, PartialOrd, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Serialize, Clone, Hash, PartialOrd, PartialEq, Eq, Ord)]
 pub struct NevraId(pub i64, pub i64, pub i64);
 
 impl FromStr for NevraId {
@@ -113,17 +114,21 @@ pub struct Repo {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Hash)]
-pub struct Errata {
+pub struct Erratum {
     pub name: String,
     pub synopsis: String,
     pub summary: String,
-    pub typ: String,
+
+    pub r#type: String,
     pub severity: String,
     pub description: Option<String>,
     pub solution: String,
     pub issued: String,
     pub updated: String,
     pub url: String,
+
+    pub bugzillas: Vec<String>,
+    pub refs: Vec<String>,
 }
 
 
@@ -133,7 +138,7 @@ pub struct Cache {
     pub id_to_name: Map<i64, String>,
 
     pub updates: Map<i64, Vec<i64>>,
-    pub updates_index: Map<i64, Map<i64, usize>>,
+    pub updates_index: Map<i64, Map<i64, Vec<usize>>>,
 
     pub evr_to_id: Map<Evr, i64>,
     pub id_to_evr: Map<i64, Evr>,
@@ -147,16 +152,18 @@ pub struct Cache {
     pub nevra_to_pkgid: Map<NevraId, i64>,
     pub repo_detail: Map<i64, Repo>,
     pub repolabel_to_ids: Map<String, Vec<i64>>,
+
     pub productid_to_repoids: Map<i64, Vec<i64>>,
     pub pkgid_to_repoids: Map<i64, Vec<i64>>,
+
     pub errataid_to_name: Map<i64, String>,
     pub pkgid_to_errataids: Map<i64, Vec<i64>>,
     pub errataid_to_repoids: Map<i64, Vec<i64>>,
     pub cve_detail: Map<i64, Cve>,
     pub dbchange: Map<String, String>,
-    pub errata_detail: Map<i64, Errata>,
-    pub pkgerrata_to_module: Map<String, String>,
-    pub modulename_to_id: Map<String, Vec<i64>>,
+    pub errata_detail: Map<i64, Erratum>,
+    pub pkgerrata_to_module: Map<(i64, i64), Vec<i64>>,
+    pub modulename_to_id: Map<(String, String), i64>,
     pub src_pkg_id_to_pkg_ids: Map<i64, Vec<i64>>,
     pub strings: Map<i64, Option<String>>,
 }
@@ -171,7 +178,7 @@ pub fn load_updates(db: &mut Connection, cache: &mut Cache) -> Result<()> {
 
     load_rows(db, "updates_index", "name_id, evr_id, package_order", "package_order", |r| {
         let per_name = cache.updates_index.entry(r.get(0)?).or_default();
-        *per_name.entry(r.get(1)?).or_default() = r.get::<_, isize>(2)? as usize;
+        per_name.entry(r.get(1)?).or_default().push(r.get::<_, isize>(2)? as usize);
         Ok(())
     })?;
 
@@ -310,36 +317,64 @@ pub fn load_cve(db: &mut Connection, cache: &mut Cache) -> Result<()> {
 }
 
 pub fn load_dbchange(db: &mut Connection, cache: &mut Cache) -> Result<()> {
+    load_rows(db, "dbchange", "errata_changes, cve_changes, repository_changes, last_change, exported", "exported", |row| {
+        cache.dbchange.insert("errata_changes".to_string(), row.get(0)?);
+        cache.dbchange.insert("cve_changes".to_string(), row.get(1)?);
+        cache.dbchange.insert("repository_changes".to_string(), row.get(2)?);
+        cache.dbchange.insert("last_change".to_string(), row.get(3)?);
+        cache.dbchange.insert("exported".to_string(), row.get(4)?);
+        Ok(())
+    })?;
     Ok(())
 }
 
 pub fn load_errata(db: &mut Connection, cache: &mut Cache) -> Result<()> {
     load_rows(db, "errata_detail", "id, name, synopsis, summary, type, severity, description, solution, issued, updated, url", "id", |r| {
-        let erratum = Errata {
+        let erratum = Erratum {
             name: r.get(1)?,
             synopsis: r.get(2)?,
             summary: r.get(3)?,
-            typ: r.get(4)?,
+            r#type: r.get(4)?,
             severity: r.get(5)?,
             description: r.get(6)?,
             solution: r.get(7)?,
             issued: r.get(8)?,
             updated: r.get(9)?,
             url: r.get(10)?,
+
+            bugzillas: vec![],
+            refs: vec![],
         };
         cache.errata_detail.insert(r.get(0)?, erratum);
         Ok(())
     })?;
 
+    for (eid, bugzillas) in load_multimap(db, "errata_bugzilla", "errata_id", "bugzilla", "errata_id")?.into_iter() {
+        if let Some(erratum) = cache.errata_detail.get_mut(&eid) {
+            erratum.bugzillas = bugzillas;
+        }
+    }
+
+    for (eid, refs) in load_multimap(db, "errata_refs", "errata_id", "ref", "errata_id")?.into_iter() {
+        if let Some(erratum) = cache.errata_detail.get_mut(&eid) {
+            erratum.refs = refs;
+        }
+    }
     Ok(())
 }
 
 
 pub fn load_modules(db: &mut Connection, cache: &mut Cache) -> Result<()> {
-    cache.modulename_to_id = load_multimap(db, "module_stream", "module", "stream_id", "module")?;
-    /*
-    pub pkgerrata_to_module: Map<String, String>,
-    */
+    load_rows(db, "module_stream", "module, stream, stream_id", "stream_id", |r| {
+        cache.modulename_to_id.insert((r.get(0)?, r.get(1)?), r.get(2)?);
+        Ok(())
+    })?;
+    load_rows(db, "errata_modulepkg", "pkg_id, errata_id, module_stream_id", "pkg_id", |r| {
+        let k = (r.get(0)?, r.get(1)?);
+
+        cache.pkgerrata_to_module.entry(k).or_default().push(r.get(2)?);
+        Ok(())
+    })?;
 
     Ok(())
 }

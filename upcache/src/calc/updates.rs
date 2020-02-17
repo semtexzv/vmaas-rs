@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 
 pub struct Updates;
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ModuleSpec {
     pub module_name: String,
     pub module_stream: String,
@@ -48,12 +48,14 @@ pub struct Response {
     #[serde(skip_serializing_if = "Option::is_none")]
     repository_list: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    modules_list: Option<Vec<ModuleSpec>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     releasever: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     basearch: Option<String>,
 }
 
-macro_rules! try_skip {
+macro_rules! try_cont {
     ($res:expr) => {
         match $res {
             Some(val) => val,
@@ -66,7 +68,7 @@ macro_rules! try_skip {
         match $res {
             Some(val) => val,
             _ => {
-                println!($msg $(,$args)*);
+                //println!($msg $(,$args)*);
                 continue;
             }
         }
@@ -121,11 +123,11 @@ impl Updates {
             .intersection(available_repo_ids).map(|s| *s).collect::<Set<i64>>();
 
 
-        repo_ids.retain(|repo_id| {
+        let repo_ids = repo_ids.clone().into_iter().filter(|repo_id| {
             let detail = &cache.repo_detail[&repo_id];
             valid_releasevers.contains(&detail.releasever)
                 && product_ids.contains(&detail.product_id)
-        });
+        }).collect();
 
 
         return repo_ids;
@@ -135,29 +137,65 @@ impl Updates {
         cache: &Cache,
         packages_to_process: &Map<&str, Nevra>,
         available_repo_ids: &Set<i64>,
+        module_ids: &Vec<i64>,
         response: &mut Response,
     ) -> Result<()> {
         for (pkg, nevra) in packages_to_process.iter() {
-            println!("Processing {:?}", pkg);
-            let name_id = try_skip!(cache.name_to_id.get(&nevra.name), "Name not found");
-            let updates = try_skip!(cache.updates.get(&name_id), "Updates not found");
-            let updates_index = try_skip!(cache.updates_index.get(&name_id), "updates index not found");
+            
+            let name_id = try_cont!(cache.name_to_id.get(&nevra.name), "Name not found");
+            let updates = try_cont!(cache.updates.get(&name_id), "Updates not found");
+            let updates_index = try_cont!(cache.updates_index.get(&name_id), "updates index not found");
 
-            let evr_id = try_skip!(cache.evr_to_id.get(&nevra.evr()), "Evr not found {:?}", nevra);
+            let evr_id = try_cont!(cache.evr_to_id.get(&nevra.evr()), "Evr not found {:?}", nevra);
 
             let arch_id = cache.arch_to_id.get(&nevra.arch).ok_or(format!("arch_id not found : {:?}", nevra.arch))?;
-            let arch_compat = try_skip!(cache.arch_compat.get(arch_id), "Arch compat not found");
-            let current_evr_idx = try_skip!(updates_index.get(&evr_id), "EVR index not found");
+            let arch_compat = try_cont!(cache.arch_compat.get(arch_id), "Arch compat not found");
 
-            let current_nevra_pkg_id = updates[*current_evr_idx];
-            println!("Package FOUND {:?} = with NEVRA:{:?} Found", current_nevra_pkg_id, nevra);
+
+            // If nothing is found, use empty list
+            let current_evr_idxs: &[_] = try_cont!(updates_index.get(&evr_id));
+
+            if current_evr_idxs.is_empty() {
+                //error!("package {:?} has no updates", name_id);
+                continue;
+            }
+
+            let mut current_nevra_pkg_id = None;
+
+            for current_evr_idx in current_evr_idxs {
+                //error!("current evr idx : => {:?}", current_evr_idx);
+
+                let pkg_id = cache.updates[&name_id][*current_evr_idx as usize];
+                let current_nevra_arch_id = &cache.pkg_details[&pkg_id].arch_id;
+
+                //trace!("Package archs : {:?}, {:?}", current_nevra_arch_id, arch_id);
+                if current_nevra_arch_id == arch_id {
+                    current_nevra_pkg_id = Some(pkg_id);
+                    break;
+                }
+            }
+
+            if current_nevra_pkg_id.is_none() {
+                //error!("Package with NEVRA: {:?} not found", nevra);
+                continue;
+            } else {
+                //error!("Package with NEVRA: {:?} Found", nevra);
+            }
+
+            let current_nevra_pkg_id = current_nevra_pkg_id.unwrap();
+
+            //println!("Package FOUND {:?} = {:?} with NEVRA:{:?} Found", current_nevra_pkg_id, arch_id, nevra);
 
             let resp_pkg_detail = response.update_list.entry((*pkg).into()).or_default();
 
             let last_version_pkg_id = updates.last();
             if last_version_pkg_id == Some(&current_nevra_pkg_id) {
-                println!("Package is last, no updates");
+                //println!("Package is last, no updates");
                 continue;
+            }
+
+            if cache.pkg_details[&current_nevra_pkg_id].arch_id != *arch_id {
+                //panic!("Arch id of found package wrong")
             }
 
             let mut original_package_repo_ids = Set::default();
@@ -169,12 +207,12 @@ impl Updates {
             let product_ids = Self::related_products(cache, &original_package_repo_ids);
             let valid_releasevers = Self::valid_releasevers(cache, &original_package_repo_ids);
 
-            println!("Valid prods : {:?}, valid vers : {:?}", product_ids, valid_releasevers);
-            let update_pkg_ids = &updates[(*current_evr_idx + 1)..];
+            //println!("Valid prods : {:?}, valid vers : {:?}", product_ids, valid_releasevers);
+            let update_pkg_ids = &updates[current_evr_idxs.last().unwrap() + 1..];
 
             for update_pkg_id in update_pkg_ids {
-                println!("Update pkg id : {:?}", update_pkg_id);
-                let errata_ids = try_skip!(cache.pkgid_to_errataids.get(update_pkg_id));
+               // println!("Update pkg id : {:?}", update_pkg_id);
+                let errata_ids = try_cont!(cache.pkgid_to_errataids.get(update_pkg_id));
                 let updated_nevra_arch_id = cache.pkg_details[update_pkg_id].arch_id;
                 //println!("Update pkg arch : {:?}, orig arch id : {:?}", updated_nevra_arch_id, arch_id);
 
@@ -185,6 +223,14 @@ impl Updates {
                 }
                 let nevra = Self::build_nevra(cache, *update_pkg_id);
                 for errata_id in errata_ids {
+                    if module_ids.len() > 0 {
+                        if let Some(pkg_errata_mods) = cache.pkgerrata_to_module.get(&(*update_pkg_id, *errata_id)) {
+                            if Set::from_iter(module_ids).intersection(&Set::from_iter(pkg_errata_mods)).count() == 0 {
+                                continue;
+                            }
+                        }
+                    }
+
                     let mut repo_ids = Self::get_repositories(
                         cache,
                         &product_ids,
@@ -193,7 +239,8 @@ impl Updates {
                         &available_repo_ids,
                         &valid_releasevers,
                     );
-                    println!("Repoids avail : {:?}", repo_ids);
+
+                   // println!("Repoids avail : {:?}", repo_ids);
 
                     for repo_id in repo_ids {
                         let repo_det = &cache.repo_detail[&repo_id];
@@ -259,14 +306,16 @@ impl Updates {
         let mut filtered_pkgs_to_process = Map::default();
 
         for pkg in &data.package_list {
+            //println!("pkg: {:?}", pkg);
             if let Ok(nevra) = Nevra::from_str(pkg.as_str()) {
+                response.update_list.entry(pkg.clone()).or_default();
                 if let Some(id) = cache.name_to_id.get(&nevra.name) {
                     if let Some(up) = cache.updates_index.get(id) {
                         filtered_pkgs_to_process.insert(pkg.as_str(), nevra);
                     }
                 }
             } else {
-                println!("Not a valid nevra {:?}", pkg)
+                //println!("Not a valid nevra {:?}", pkg)
             }
         }
 
@@ -275,22 +324,35 @@ impl Updates {
 
     pub fn calc_updates(cache: &Cache, data: Request) -> Result<Response> {
         let mut response = Response::default();
+
+        let mut module_ids = vec![];
+        if let Some(ref modules_list) = data.modules_list {
+            response.modules_list = Some(modules_list.clone());
+            for m in modules_list.iter() {
+                if let Some(module) = cache.modulename_to_id.get(&(m.module_name.clone(), m.module_stream.clone())) {
+                    module_ids.push(*module);
+                }
+            }
+        }
+
         let available_repo_ids = Self::process_repositories(cache, &data, &mut response);
 
-        if let Some(ref modules_list) = data.modules_list {
-            for m in modules_list {}
-        }
         let mut packages_to_process = Self::process_input_packages(cache, &data, &mut response);
 
         for (pkg, nevra) in packages_to_process.iter() {
             response.update_list.insert(pkg.to_string(), UpdatesPkgDetail::default());
         }
 
-        println!("Calc updates - {:?}", available_repo_ids);
+        for (pkg, nevra) in packages_to_process.iter() {
+            response.update_list.insert(pkg.to_string(), UpdatesPkgDetail::default());
+        }
+
+        //println!("Calc updates - {:?}", available_repo_ids);
         Self::process_updates(
             cache,
             &packages_to_process,
             &available_repo_ids,
+            &module_ids,
             &mut response,
         )?;
         Ok(response)

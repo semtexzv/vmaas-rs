@@ -22,13 +22,13 @@ pub fn load_vec<T: FromSql>(db: &mut Connection, tbl: &str, col: &str, order: &s
     Ok(res)
 }
 
-pub fn load_map<K: FromSql + Eq + Hash, V: FromSql>(db: &mut Connection, tbl: &str, key_col: &str, val_col: &str, order: &str) -> Result<Map<K, V>> {
+pub fn load_map<K: FromSql + Eq + Hash + Ord, V: FromSql>(db: &mut Connection, tbl: &str, key_col: &str, val_col: &str, order: &str) -> Result<Map<K, V>> {
     let a = load_vec(db, tbl, key_col, order)?;
     let b = load_vec(db, tbl, val_col, order)?;
     return Ok((a.into_iter().zip(b.into_iter())).collect());
 }
 
-pub fn load_multimap<K: FromSql + Eq + Hash, V: FromSql>(db: &mut Connection, tbl: &str, key_col: &str, val_col: &str, order: &str) -> Result<Map<K, Vec<V>>> {
+pub fn load_multimap<K: FromSql + Eq + Hash + Ord, V: FromSql>(db: &mut Connection, tbl: &str, key_col: &str, val_col: &str, order: &str) -> Result<Map<K, Vec<V>>> {
     let a = load_vec(db, tbl, key_col, order)?;
     let b = load_vec(db, tbl, val_col, order)?;
 
@@ -39,6 +39,6 @@ pub fn load_multimap<K: FromSql + Eq + Hash, V: FromSql>(db: &mut Connection, tb
     return Ok(res);
 }
 
-pub fn invert<K: Hash + Eq + Clone, V: Hash + Eq + Clone>(v: &Map<K, V>) -> Map<V, K> {
+pub fn invert<K: Hash + Eq + Clone + Ord, V: Hash + Eq + Clone + Ord>(v: &Map<K, V>) -> Map<V, K> {
     v.iter().map(|(a, b)| (b.clone(), a.clone())).collect()
 }
